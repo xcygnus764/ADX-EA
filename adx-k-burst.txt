@@ -1,0 +1,1684 @@
+//+------------------------------------------------------------------+
+//|                                    ADX-K Burst EA with Divergence|
+//|                                          Copyright 2025         |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025"
+#property link      ""
+#property version   "1.00"
+#property strict
+
+// EA入力パラメータ - 一般設定
+input bool     VerboseLogging = true;   // 詳細なログ出力を有効にする
+input int      LogDecimalPlaces = 3;    // ログの小数点以下の桁数
+
+// EA入力パラメータ - 指標設定
+input int      ADX_Period = 14;        // ADXの期間
+input double   K_Multiplier = 1.0;     // Kの乗数
+input double   ADX_Threshold = 25.0;   // ADXのトレンド強度閾値
+input ENUM_APPLIED_PRICE  Price_Type = PRICE_CLOSE; // 価格タイプ
+
+// EA入力パラメータ - 追加指標設定
+input int      RSI_Period = 14;        // RSIの期間
+input int      MACD_Fast_Period = 12;  // MACD速いEMA期間
+input int      MACD_Slow_Period = 26;  // MACD遅いEMA期間
+input int      MACD_Signal_Period = 9; // MACDシグナル期間
+input int      StochK_Period = 14;     // Stochastic %K期間
+input int      StochD_Period = 3;      // Stochastic %D期間
+input int      StochSlowing = 3;       // Stochasticスローイング
+
+// EA入力パラメータ - 取引設定
+input double   Lots = 0.01;            // 取引ロット数
+input int      MaxPositions = 1;       // 最大ポジション数
+input int      Slippage = 20;          // スリッページ（ポイント）
+input int      MaxSpread = 30;         // 最大許容スプレッド（ポイント）
+input bool     LimitToBTC = false;     // BTCUSDに限定するかどうか
+
+// 連続エントリー防止設定
+input bool     PreventDuplicateEntries = true;  // 同じ価格帯での連続エントリーを防止
+input double   PriceBuffer = 50;                // 前回エントリー価格からのバッファ（ポイント）
+input int      MinBarsBetweenTrades = 5;        // トレード間の最小バー数
+
+// EA入力パラメータ - 決済条件
+input int      StopLoss = 200;         // ストップロスポイント
+input int      TakeProfit = 400;       // 利益確定ポイント
+
+// トレーリングストップ設定
+input bool     UseTrailingStop = true; // トレーリングストップを使用
+input int      TrailingStop = 150;     // トレーリングストップポイント
+input int      TrailingStep = 20;      // トレーリングステップ
+
+// 時間ベースの決済
+input bool     UseTimeExit = false;    // 時間ベースの決済を使用
+input int      MaxTradeHours = 24;     // 最大保有時間（時間単位）
+
+// 逆シグナル決済
+input bool     UseReverseSignalExit = true; // 逆シグナルによる決済を使用
+input bool     UseDICrossExit = true;       // DI再クロスによる決済を使用
+
+// 指標ベースの決済
+input bool     UseIndicatorExit = true; // 指標ベースの決済を使用
+input double   ADX_Exit_Threshold = 15.0; // ADXが下回ると決済する閾値
+input bool     UseADXPeakExit = true;    // ADXピークによる決済を使用
+input double   ADX_Peak_Threshold = 40.0; // ADXがこの値を超えると決済する閾値
+
+// 部分決済設定
+input bool     UsePartialClose = false; // 部分決済を使用
+input double   PartialClosePercent = 50; // 部分決済の割合（%）
+input int      PartialClosePips = 100;   // 部分決済を実行する利益（ポイント）
+
+// ダイバージェンス設定
+input bool     UseDivergenceExit = true;  // ダイバージェンスによる決済を使用
+input bool     UseDivergenceEntry = true; // ダイバージェンスによるエントリーを使用
+input int      DivergenceLookback = 10;   // ダイバージェンス検出のルックバック期間
+input int      MinIndicatorsForDivergence = 3; // ダイバージェンス確認に必要な最小指標数（偽検出防止用）
+
+// エラー処理設定
+input int      MaxRetries = 5;          // エラー発生時の最大再試行回数
+input int      RetryDelay = 1000;       // 再試行間の遅延（ミリ秒）
+
+// グローバル変数
+int adx_handle;          // ADX指標ハンドル
+int rsi_handle;          // RSI指標ハンドル
+int macd_handle;         // MACD指標ハンドル
+int stoch_handle;        // Stochastic指標ハンドル
+int buySellSignal = 0;   // 売買シグナル（1=買い、-1=売り、0=なし）
+datetime positions_time[]; // ポジションのオープン時間を保存する配列
+bool divergenceDetected = false; // ダイバージェンス検出フラグ
+int divergenceType = 0;  // ダイバージェンスタイプ（1=ブリッシュ、-1=ベアリッシュ、0=なし）
+
+// チャートデータバッファ
+double price_high[];   // 高値
+double price_low[];    // 安値
+double price_close[];  // 終値
+
+// 指標データバッファ
+double adx_main[];     // ADXメインライン
+double plus_di[];      // +DIライン
+double minus_di[];     // -DIライン
+double rsi_buffer[];   // RSI値
+double macd_main[];    // MACDメインライン
+double macd_signal[];  // MACDシグナルライン
+double stoch_main[];   // Stochastic %Kライン
+double stoch_signal[]; // Stochastic %Dライン
+
+// 連続エントリー防止用の変数
+datetime last_trade_time = 0;              // 最後の取引時間
+double   last_buy_price = 0;               // 最後の買いエントリー価格
+double   last_sell_price = 0;              // 最後の売りエントリー価格
+int      bars_since_last_trade = 0;        // 前回の取引からのバー数
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // 指標ハンドルの初期化
+    adx_handle = iADX(_Symbol, _Period, ADX_Period);
+    rsi_handle = iRSI(_Symbol, _Period, RSI_Period, Price_Type);
+    macd_handle = iMACD(_Symbol, _Period, MACD_Fast_Period, MACD_Slow_Period, 
+                       MACD_Signal_Period, Price_Type);
+    stoch_handle = iStochastic(_Symbol, _Period, StochK_Period, StochD_Period, 
+                              StochSlowing, MODE_SMA, STO_LOWHIGH);
+    
+    // 指標ハンドルの確認
+    if (adx_handle == INVALID_HANDLE || rsi_handle == INVALID_HANDLE || 
+        macd_handle == INVALID_HANDLE || stoch_handle == INVALID_HANDLE)
+    {
+        Print("エラー: 指標の作成に失敗しました");
+        return(INIT_FAILED);
+    }
+    
+    // 取引許可の確認
+    if (!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+    {
+        Print("警告: 自動取引が許可されていません");
+    }
+    
+    // 通貨ペアの確認 (BTC制限が有効な場合)
+    string symbol = _Symbol;
+    if (LimitToBTC && StringFind(symbol, "BTC") < 0)
+    {
+        Print("警告: LimitToBTCが有効で、このEAはBTCUSD用に最適化されています。現在のチャート: ", symbol);
+    }
+    
+    // 時間足の確認 (1分足専用)
+    if (_Period != PERIOD_M1)
+    {
+        Print("警告: このEAは1分足用に最適化されています。現在の時間足: ", PeriodToString(_Period));
+    }
+    
+    // ブローカー固有の設定を確認
+    CheckBrokerSettings();
+    
+    // 各通貨ペアの特性を確認
+    double point = _Point;
+    int digits = _Digits;
+    double ticksize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickvalue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double contractsize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+        
+    if (VerboseLogging)
+    {
+        Print(_Symbol, " 特性:");
+        Print("小数点桁数: ", digits);
+        Print("ポイント値: ", point);
+        Print("ティックサイズ: ", ticksize);
+        Print("ティック価値: ", tickvalue);
+        Print("契約サイズ: ", contractsize);
+        Print("最小ロット: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+        Print("最大ロット: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+        Print("ロットステップ: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP));
+    }
+    
+    // 通貨ペア固有の設定調整
+    AdjustSettingsForSymbol();
+    
+    // 配列の初期化
+    ArrayResize(positions_time, MaxPositions);
+    ArraySetAsSeries(positions_time, true);
+    
+    // データバッファの初期化
+    ArraySetAsSeries(price_high, true);
+    ArraySetAsSeries(price_low, true);
+    ArraySetAsSeries(price_close, true);
+    ArraySetAsSeries(adx_main, true);
+    ArraySetAsSeries(plus_di, true);
+    ArraySetAsSeries(minus_di, true);
+    ArraySetAsSeries(rsi_buffer, true);
+    ArraySetAsSeries(macd_main, true);
+    ArraySetAsSeries(macd_signal, true);
+    ArraySetAsSeries(stoch_main, true);
+    ArraySetAsSeries(stoch_signal, true);
+    
+    // 連続エントリー防止の初期化
+    InitializeDuplicateEntryPrevention();
+    
+    Print("ADX-K Burst EA with Divergence 初期化完了 - BTCUSD/1分足 対応");
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| 時間足を文字列に変換                                              |
+//+------------------------------------------------------------------+
+string PeriodToString(ENUM_TIMEFRAMES period)
+{
+    switch(period)
+    {
+        case PERIOD_M1:  return "M1";
+        case PERIOD_M5:  return "M5";
+        case PERIOD_M15: return "M15";
+        case PERIOD_M30: return "M30";
+        case PERIOD_H1:  return "H1";
+        case PERIOD_H4:  return "H4";
+        case PERIOD_D1:  return "D1";
+        case PERIOD_W1:  return "W1";
+        case PERIOD_MN1: return "MN1";
+        default:         return "Unknown";
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ブローカー固有の設定を確認                                         |
+//+------------------------------------------------------------------+
+void CheckBrokerSettings()
+{
+    // ブローカー情報の取得
+    string broker = AccountInfoString(ACCOUNT_COMPANY);
+    long account_type = AccountInfoInteger(ACCOUNT_MARGIN_SO_MODE);
+    
+    if (VerboseLogging)
+    {
+        Print("ブローカー情報: ", broker);
+        Print("口座タイプ: ", GetAccountTypeDescription(account_type));
+        Print("小数点桁数: ", _Digits);
+        Print("ポイント値: ", _Point);
+        Print("最小ロット: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+        Print("最大ロット: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+        Print("ロットステップ: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP));
+    }
+    
+    // ロットサイズの確認と修正
+    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    // ロットサイズが範囲外の場合は修正
+    if (Lots < min_lot)
+    {
+        Print("警告: 設定されたロットサイズが小さすぎます。最小値に修正します: ", min_lot);
+        // 注: 実際の値は変更できないため、警告を表示するのみ
+    }
+    else if (Lots > max_lot)
+    {
+        Print("警告: 設定されたロットサイズが大きすぎます。最大値に修正します: ", max_lot);
+        // 注: 実際の値は変更できないため、警告を表示するのみ
+    }
+    
+    // トレーディング機能の確認
+    bool trade_allowed = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+    bool expert_allowed = TerminalInfoInteger(TERMINAL_EXPERT_ALLOWED);
+    bool algo_allowed = TerminalInfoInteger(TERMINAL_DLLS_ALLOWED);
+    
+    if (!trade_allowed || !expert_allowed)
+    {
+        Print("警告: 自動取引が許可されていません。権限を確認してください。");
+    }
+    
+    // フィルタイプの確認
+    int filling_mode = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+    
+    if (VerboseLogging)
+    {
+        Print("注文フィルタイプ: ", GetFillingTypeDescription(filling_mode));
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 通貨ペアに応じた設定調整                                         |
+//+------------------------------------------------------------------+
+void AdjustSettingsForSymbol()
+{
+    string symbol = _Symbol;
+    
+    // スプレッド情報の取得
+    double current_spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+    
+    if (VerboseLogging)
+    {
+        Print("現在のスプレッド: ", NormalizeDouble(current_spread, 1), " ポイント");
+    }
+    
+    // 通貨ペアごとのデフォルト設定調整（必要に応じて）
+    if (StringFind(symbol, "BTC") >= 0 || StringFind(symbol, "XBT") >= 0)
+    {
+        // BTCUSDのような暗号通貨ペアのデフォルト設定
+        if (VerboseLogging)
+        {
+            Print("暗号通貨ペアを検出しました。設定を最適化します。");
+        }
+        
+        // BTC特有の設定調整は必要に応じて実装
+    }
+    else if (StringFind(symbol, "JPY") >= 0)
+    {
+        // 円ペア（USDJPY、EURJPYなど）の特性
+        if (VerboseLogging)
+        {
+            Print("円ペアを検出しました。設定を最適化します。");
+        }
+        
+        // 円ペア特有の設定調整は必要に応じて実装
+    }
+    else if (StringFind(symbol, "EUR") >= 0 || StringFind(symbol, "GBP") >= 0 || 
+             StringFind(symbol, "AUD") >= 0 || StringFind(symbol, "USD") >= 0)
+    {
+        // メジャー通貨ペア（EURUSD、GBPUSDなど）の特性
+        if (VerboseLogging)
+        {
+            Print("メジャー通貨ペアを検出しました。設定を最適化します。");
+        }
+        
+        // メジャー通貨ペア特有の設定調整は必要に応じて実装
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 通貨ペアに応じた最大スプレッド閾値を取得                           |
+//+------------------------------------------------------------------+
+double GetAdjustedMaxSpread()
+{
+    string symbol = _Symbol;
+    
+    // 通貨ペアごとの推奨スプレッド閾値
+    if (StringFind(symbol, "BTC") >= 0 || StringFind(symbol, "XBT") >= 0)
+    {
+        // BTCUSDのような暗号通貨はスプレッドが広いことが多い
+        return MaxSpread; // デフォルトのまま使用（ユーザー設定値）
+    }
+    else if (StringFind(symbol, "JPY") >= 0)
+    {
+        // 円ペアはポイント数の意味が異なるため調整
+        // 通常、円ペアは小数点2桁（0.01）が最小単位
+        // MaxSpreadが大きい場合は、円ペア向けに調整
+        if (MaxSpread > 20) 
+            return 3.0; // 円ペア向けのデフォルト値
+        else
+            return MaxSpread;
+    }
+    else
+    {
+        // EURUSD、GBPUSDなどのメジャー通貨ペア
+        // 通常、小数点5桁（0.00001）が最小単位
+        if (MaxSpread > 20)
+            return 5.0; // メジャー通貨ペア向けのデフォルト値
+        else
+            return MaxSpread;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 口座タイプの説明を取得                                             |
+//+------------------------------------------------------------------+
+string GetAccountTypeDescription(long account_type)
+{
+    switch(account_type)
+    {
+        case ACCOUNT_MARGIN_SO_MODE_RETAIL_NETTING:
+            return "ネッティング";
+        case ACCOUNT_MARGIN_SO_MODE_EXCHANGE:
+            return "取引所";
+        case ACCOUNT_MARGIN_SO_MODE_RETAIL_HEDGING:
+            return "ヘッジング";
+        default:
+            return "不明";
+    }
+}
+
+//+------------------------------------------------------------------+
+//| フィルタイプの説明を取得                                           |
+//+------------------------------------------------------------------+
+string GetFillingTypeDescription(int filling_mode)
+{
+    string description = "";
+    
+    if (filling_mode & SYMBOL_FILLING_FOK)
+        description += "Fill or Kill, ";
+    if (filling_mode & SYMBOL_FILLING_IOC)
+        description += "Immediate or Cancel, ";
+    if (filling_mode & SYMBOL_FILLING_RETURN)
+        description += "Return, ";
+    
+    if (description == "")
+        return "不明";
+        
+    return StringSubstr(description, 0, StringLen(description) - 2);
+}
+
+//+------------------------------------------------------------------+
+//| 連続エントリー防止機能の初期化                                     |
+//+------------------------------------------------------------------+
+void InitializeDuplicateEntryPrevention()
+{
+    last_trade_time = 0;
+    last_buy_price = 0;
+    last_sell_price = 0;
+    bars_since_last_trade = 0;
+}
+
+//+------------------------------------------------------------------+
+//| 新しい取引時間を記録                                              |
+//+------------------------------------------------------------------+
+void RecordTradeTime()
+{
+    last_trade_time = TimeCurrent();
+    bars_since_last_trade = 0;
+}
+
+//+------------------------------------------------------------------+
+//| バー数のカウントを更新                                            |
+//+------------------------------------------------------------------+
+void UpdateBarsSinceLastTrade()
+{
+    if (last_trade_time > 0)
+    {
+        bars_since_last_trade++;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 買いエントリーが許可されているかチェック                           |
+//+------------------------------------------------------------------+
+bool IsBuyEntryAllowed(double current_price)
+{
+    if (!PreventDuplicateEntries)
+        return true;
+    
+    // 価格帯のチェック
+    if (last_buy_price > 0)
+    {
+        // 前回のエントリー価格からのバッファ範囲内かチェック
+        if (MathAbs(current_price - last_buy_price) < PriceBuffer * _Point)
+        {
+            // バー数のチェック
+            if (bars_since_last_trade < MinBarsBetweenTrades)
+            {
+                if (VerboseLogging)
+                {
+                    Print("買いエントリーをスキップ: 前回のエントリーから ", 
+                          bars_since_last_trade, "/", MinBarsBetweenTrades, 
+                          " バー、価格差: ", 
+                          NormalizeDouble(MathAbs(current_price - last_buy_price) / _Point, 1), 
+                          "/", PriceBuffer, " ポイント");
+                }
+                return false;
+            }
+        }
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| 売りエントリーが許可されているかチェック                           |
+//+------------------------------------------------------------------+
+bool IsSellEntryAllowed(double current_price)
+{
+    if (!PreventDuplicateEntries)
+        return true;
+    
+    // 価格帯のチェック
+    if (last_sell_price > 0)
+    {
+        // 前回のエントリー価格からのバッファ範囲内かチェック
+        if (MathAbs(current_price - last_sell_price) < PriceBuffer * _Point)
+        {
+            // バー数のチェック
+            if (bars_since_last_trade < MinBarsBetweenTrades)
+            {
+                if (VerboseLogging)
+                {
+                    Print("売りエントリーをスキップ: 前回のエントリーから ", 
+                          bars_since_last_trade, "/", MinBarsBetweenTrades, 
+                          " バー、価格差: ", 
+                          NormalizeDouble(MathAbs(current_price - last_sell_price) / _Point, 1), 
+                          "/", PriceBuffer, " ポイント");
+                }
+                return false;
+            }
+        }
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| 買いポジションのエントリー価格を記録                                |
+//+------------------------------------------------------------------+
+void RecordBuyPrice(double price)
+{
+    last_buy_price = price;
+    RecordTradeTime();
+}
+
+//+------------------------------------------------------------------+
+//| 売りポジションのエントリー価格を記録                                |
+//+------------------------------------------------------------------+
+void RecordSellPrice(double price)
+{
+    last_sell_price = price;
+    RecordTradeTime();
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // 指標ハンドルの解放
+    if (adx_handle != INVALID_HANDLE)
+        IndicatorRelease(adx_handle);
+    if (rsi_handle != INVALID_HANDLE)
+        IndicatorRelease(rsi_handle);
+    if (macd_handle != INVALID_HANDLE)
+        IndicatorRelease(macd_handle);
+    if (stoch_handle != INVALID_HANDLE)
+        IndicatorRelease(stoch_handle);
+    
+    Print("ADX-K Burst EA with Divergence 終了");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // 新しいバーの確認
+    static datetime old_time;
+    datetime new_time = iTime(_Symbol, _Period, 0);
+    if (old_time == new_time)
+        return;
+    old_time = new_time;
+    
+    // 前回取引からのバー数を更新
+    UpdateBarsSinceLastTrade();
+    
+    // データの取得
+    UpdateData();
+    
+    // Kバースト計算
+    double k_burst = K_Multiplier * (plus_di[0] - minus_di[0]);
+    
+    // 前のシグナルを保存
+    int previousSignal = buySellSignal;
+    
+    // 詳細ログ出力
+    if (VerboseLogging)
+    {
+        // 値を指定された小数点以下の桁数に丸める
+        double rounded_adx = NormalizeDouble(adx_main[0], LogDecimalPlaces);
+        double rounded_plus_di = NormalizeDouble(plus_di[0], LogDecimalPlaces);
+        double rounded_minus_di = NormalizeDouble(minus_di[0], LogDecimalPlaces);
+        double rounded_k_burst = NormalizeDouble(k_burst, LogDecimalPlaces);
+        double rounded_rsi = NormalizeDouble(rsi_buffer[0], LogDecimalPlaces);
+        double rounded_macd = NormalizeDouble(macd_main[0], LogDecimalPlaces);
+        
+        // スプレッド情報
+        double current_spread = NormalizeDouble((SymbolInfoDouble(_Symbol, SYMBOL_ASK) - 
+                                SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, LogDecimalPlaces);
+        
+        // 詳細ログ出力
+        Print("===== ", _Symbol, " 状態 (", TimeToString(TimeCurrent()), ") =====");
+        Print("ADX: ", rounded_adx, " | +DI: ", rounded_plus_di, " | -DI: ", rounded_minus_di, 
+             " | K値: ", rounded_k_burst);
+        Print("RSI: ", rounded_rsi, " | MACD: ", rounded_macd, " | スプレッド: ", current_spread, " ポイント");
+        
+        // 通貨ペア固有の情報
+        string symbol_type = "通常通貨ペア";
+        if (StringFind(_Symbol, "BTC") >= 0 || StringFind(_Symbol, "XBT") >= 0)
+            symbol_type = "暗号通貨ペア";
+        else if (StringFind(_Symbol, "JPY") >= 0)
+            symbol_type = "円ペア";
+        
+        Print("通貨ペアタイプ: ", symbol_type, " | 許容スプレッド: ", GetAdjustedMaxSpread(), " ポイント");
+    }
+    
+    // ダイバージェンスの検出
+    if (UseDivergenceEntry || UseDivergenceExit)
+    {
+        CheckDivergence();
+    }
+    
+    // トレードロジック
+    if (adx_main[0] > ADX_Threshold)  // トレンドが十分に強い
+    {
+        // 通常のADX-Kバーストロジック
+        if (plus_di[0] > minus_di[0] && k_burst > 0)  // 上昇トレンド
+        {
+            // ダイバージェンスエントリーを使用する場合、ブリッシュダイバージェンスが検出された場合のみ買いシグナル
+            if (!UseDivergenceEntry || (divergenceDetected && divergenceType == 1))
+            {
+                buySellSignal = 1;  // 買いシグナル
+                if (VerboseLogging)
+                {
+                    string entry_type = divergenceDetected ? "逆張り(ダイバージェンス)" : "順張り";
+                    Print("買いシグナル発生 - ", entry_type, " | ADX: ", 
+                          NormalizeDouble(adx_main[0], LogDecimalPlaces), 
+                          " | K値: ", NormalizeDouble(k_burst, LogDecimalPlaces));
+                }
+            }
+        }
+        else if (minus_di[0] > plus_di[0] && k_burst < 0)  // 下降トレンド
+        {
+            // ダイバージェンスエントリーを使用する場合、ベアリッシュダイバージェンスが検出された場合のみ売りシグナル
+            if (!UseDivergenceEntry || (divergenceDetected && divergenceType == -1))
+            {
+                buySellSignal = -1;  // 売りシグナル
+                if (VerboseLogging)
+                {
+                    string entry_type = divergenceDetected ? "逆張り(ダイバージェンス)" : "順張り";
+                    Print("売りシグナル発生 - ", entry_type, " | ADX: ", 
+                          NormalizeDouble(adx_main[0], LogDecimalPlaces), 
+                          " | K値: ", NormalizeDouble(k_burst, LogDecimalPlaces));
+                }
+            }
+        }
+    }
+    else
+    {
+        // ADXが閾値を下回った場合、シグナルをクリア
+        buySellSignal = 0;
+    }
+    
+    // ポジション管理と決済チェック
+    CheckExitConditions(adx_main[0], k_burst, previousSignal);
+    ManagePositions();
+    
+    // スプレッドの確認
+    double current_spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+    
+    // 通貨ペアに適したスプレッド閾値を取得
+    double adjusted_max_spread = GetAdjustedMaxSpread();
+    
+    // 新規取引
+    if (CountPositions() < MaxPositions && buySellSignal != 0)
+    {
+        // スプレッドが最大許容値以下の場合のみエントリー
+        if (current_spread <= adjusted_max_spread)
+        {
+            if (buySellSignal == 1)  // 買いシグナル
+            {
+                OpenBuy();
+            }
+            else if (buySellSignal == -1)  // 売りシグナル
+            {
+                OpenSell();
+            }
+        }
+        else
+        {
+            Print("スプレッドが広すぎるため、トレードをスキップしました。現在のスプレッド: ", 
+                   NormalizeDouble(current_spread, 1), " > ", adjusted_max_spread, " ポイント");
+        }
+    }
+    
+    // ダイバージェンスフラグをリセット
+    divergenceDetected = false;
+    divergenceType = 0;
+}
+
+//+------------------------------------------------------------------+
+//| データの更新                                                      |
+//+------------------------------------------------------------------+
+void UpdateData()
+{
+    // 価格データの取得
+    CopyHigh(_Symbol, _Period, 0, DivergenceLookback + 1, price_high);
+    CopyLow(_Symbol, _Period, 0, DivergenceLookback + 1, price_low);
+    CopyClose(_Symbol, _Period, 0, DivergenceLookback + 1, price_close);
+    
+    // 指標データの取得
+    CopyBuffer(adx_handle, 0, 0, DivergenceLookback + 1, adx_main);    // メインADXライン
+    CopyBuffer(adx_handle, 1, 0, DivergenceLookback + 1, plus_di);     // +DIライン
+    CopyBuffer(adx_handle, 2, 0, DivergenceLookback + 1, minus_di);    // -DIライン
+    CopyBuffer(rsi_handle, 0, 0, DivergenceLookback + 1, rsi_buffer);  // RSI
+    CopyBuffer(macd_handle, 0, 0, DivergenceLookback + 1, macd_main);  // MACDメイン
+    CopyBuffer(macd_handle, 1, 0, DivergenceLookback + 1, macd_signal);// MACDシグナル
+    CopyBuffer(stoch_handle, 0, 0, DivergenceLookback + 1, stoch_main);// Stochastic %K
+    CopyBuffer(stoch_handle, 1, 0, DivergenceLookback + 1, stoch_signal);// Stochastic %D
+}
+
+//+------------------------------------------------------------------+
+//| ダイバージェンスの検出                                             |
+//+------------------------------------------------------------------+
+void CheckDivergence()
+{
+    // ダイバージェンス検出のための価格の高値と安値を見つける
+    int bullishDivCount = 0;  // ブリッシュダイバージェンスのカウンター
+    int bearishDivCount = 0;  // ベアリッシュダイバージェンスのカウンター
+    
+    // 各指標ごとにダイバージェンスを確認
+    
+    // ADXダイバージェンスチェック
+    bool adxBullishDiv = CheckBullishDivergence(price_low, adx_main);
+    bool adxBearishDiv = CheckBearishDivergence(price_high, adx_main);
+    
+    if (adxBullishDiv) bullishDivCount++;
+    if (adxBearishDiv) bearishDivCount++;
+    
+    // RSIダイバージェンスチェック
+    bool rsiBullishDiv = CheckBullishDivergence(price_low, rsi_buffer);
+    bool rsiBearishDiv = CheckBearishDivergence(price_high, rsi_buffer);
+    
+    if (rsiBullishDiv) bullishDivCount++;
+    if (rsiBearishDiv) bearishDivCount++;
+    
+    // MACDダイバージェンスチェック
+    bool macdBullishDiv = CheckBullishDivergence(price_low, macd_main);
+    bool macdBearishDiv = CheckBearishDivergence(price_high, macd_main);
+    
+    if (macdBullishDiv) bullishDivCount++;
+    if (macdBearishDiv) bearishDivCount++;
+    
+    // Stochasticダイバージェンスチェック
+    bool stochBullishDiv = CheckBullishDivergence(price_low, stoch_main);
+    bool stochBearishDiv = CheckBearishDivergence(price_high, stoch_main);
+    
+    if (stochBullishDiv) bullishDivCount++;
+    if (stochBearishDiv) bearishDivCount++;
+    
+    // 結果の判定（最低3つの指標で確認）
+    if (bullishDivCount >= MinIndicatorsForDivergence)
+    {
+        divergenceDetected = true;
+        divergenceType = 1;  // ブリッシュダイバージェンス
+        if (VerboseLogging)
+        {
+            Print("ブリッシュダイバージェンスを検出: ", bullishDivCount, "/", 4, "指標で確認");
+            Print("ADX: ", adxBullishDiv ? "✓" : "✗", " | RSI: ", rsiBullishDiv ? "✓" : "✗", 
+                  " | MACD: ", macdBullishDiv ? "✓" : "✗", " | Stoch: ", stochBullishDiv ? "✓" : "✗");
+        }
+    }
+    else if (bearishDivCount >= MinIndicatorsForDivergence)
+    {
+        divergenceDetected = true;
+        divergenceType = -1;  // ベアリッシュダイバージェンス
+        if (VerboseLogging)
+        {
+            Print("ベアリッシュダイバージェンスを検出: ", bearishDivCount, "/", 4, "指標で確認");
+            Print("ADX: ", adxBearishDiv ? "✓" : "✗", " | RSI: ", rsiBearishDiv ? "✓" : "✗", 
+                  " | MACD: ", macdBearishDiv ? "✓" : "✗", " | Stoch: ", stochBearishDiv ? "✓" : "✗");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ブリッシュダイバージェンスのチェック                              |
+//+------------------------------------------------------------------+
+bool CheckBullishDivergence(double &price[], double &indicator[])
+{
+    // ブリッシュダイバージェンス：価格が安値を更新しているのに、指標は安値を更新していない
+    int priceLowest1 = FindLowestValueIndex(price, 1, DivergenceLookback / 2);
+    int priceLowest2 = FindLowestValueIndex(price, DivergenceLookback / 2 + 1, DivergenceLookback);
+    
+    if (priceLowest1 < 0 || priceLowest2 < 0)
+        return false;
+    
+    // 価格が下降(安値更新)している
+    if (price[priceLowest1] < price[priceLowest2])
+    {
+        // 指標値は上昇している場合（正のダイバージェンス）
+        if (indicator[priceLowest1] > indicator[priceLowest2])
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| ベアリッシュダイバージェンスのチェック                            |
+//+------------------------------------------------------------------+
+bool CheckBearishDivergence(double &price[], double &indicator[])
+{
+    // ベアリッシュダイバージェンス：価格が高値を更新しているのに、指標は高値を更新していない
+    int priceHighest1 = FindHighestValueIndex(price, 1, DivergenceLookback / 2);
+    int priceHighest2 = FindHighestValueIndex(price, DivergenceLookback / 2 + 1, DivergenceLookback);
+    
+    if (priceHighest1 < 0 || priceHighest2 < 0)
+        return false;
+    
+    // 価格が上昇(高値更新)している
+    if (price[priceHighest1] > price[priceHighest2])
+    {
+        // 指標値は下降している場合（負のダイバージェンス）
+        if (indicator[priceHighest1] < indicator[priceHighest2])
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| 最安値のインデックスを検索                                         |
+//+------------------------------------------------------------------+
+int FindLowestValueIndex(double &array[], int start, int count)
+{
+    if (start < 0 || count <= 0 || start + count > ArraySize(array))
+        return -1;
+    
+    int lowestIdx = start;
+    double lowestVal = array[start];
+    
+    for (int i = start + 1; i < start + count && i < ArraySize(array); i++)
+    {
+        if (array[i] < lowestVal)
+        {
+            lowestVal = array[i];
+            lowestIdx = i;
+        }
+    }
+    
+    return lowestIdx;
+}
+
+//+------------------------------------------------------------------+
+//| 最高値のインデックスを検索                                         |
+//+------------------------------------------------------------------+
+int FindHighestValueIndex(double &array[], int start, int count)
+{
+    if (start < 0 || count <= 0 || start + count > ArraySize(array))
+        return -1;
+    
+    int highestIdx = start;
+    double highestVal = array[start];
+    
+    for (int i = start + 1; i < start + count && i < ArraySize(array); i++)
+    {
+        if (array[i] > highestVal)
+        {
+            highestVal = array[i];
+            highestIdx = i;
+        }
+    }
+    
+    return highestIdx;
+}
+
+//+------------------------------------------------------------------+
+//| 決済条件をチェック                                               |
+//+------------------------------------------------------------------+
+void CheckExitConditions(double adx_value, double k_burst, int previous_signal)
+{
+    // 時間ベースの決済チェック
+    if (UseTimeExit)
+    {
+        CheckTimeBasedExit();
+    }
+    
+    // 指標ベースの決済
+    if (UseIndicatorExit && adx_value < ADX_Exit_Threshold)
+    {
+        if (VerboseLogging)
+        {
+            Print("ADX閾値（低）による決済条件成立: ADX値 = ", NormalizeDouble(adx_value, LogDecimalPlaces), 
+                  " < ", ADX_Exit_Threshold);
+        }
+        CloseAllPositions("ADX閾値（低）による決済");
+    }
+    
+    // ADXピークによる決済
+    if (UseADXPeakExit && adx_value > ADX_Peak_Threshold)
+    {
+        if (VerboseLogging)
+        {
+            Print("ADX閾値（高）による決済条件成立: ADX値 = ", NormalizeDouble(adx_value, LogDecimalPlaces), 
+                  " > ", ADX_Peak_Threshold, " (トレンド過熱)");
+        }
+        CloseAllPositions("ADX閾値（高）による決済：トレンド過熱");
+    }
+    
+    // ダイバージェンスによる決済
+    if (UseDivergenceExit && divergenceDetected)
+    {
+        for (int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            ulong ticket = PositionGetTicket(i);
+            if (ticket == 0)
+                continue;
+            
+            if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+                continue;
+            
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
+            // 買いポジションを持っていて、ベアリッシュダイバージェンスが検出された場合
+            if (type == POSITION_TYPE_BUY && divergenceType == -1)
+            {
+                ClosePosition(ticket, "ベアリッシュダイバージェンスによる決済");
+            }
+            // 売りポジションを持っていて、ブリッシュダイバージェンスが検出された場合
+            else if (type == POSITION_TYPE_SELL && divergenceType == 1)
+            {
+                ClosePosition(ticket, "ブリッシュダイバージェンスによる決済");
+            }
+        }
+    }
+    
+    // DI値のクロスによる決済
+    if (UseDICrossExit)
+    {
+        CheckDICrossExit();
+    }
+    
+    // 逆シグナルによる決済
+    if (UseReverseSignalExit && previous_signal != 0 && buySellSignal != previous_signal && buySellSignal != 0)
+    {
+        if (VerboseLogging)
+        {
+            string prev_signal_str = (previous_signal == 1) ? "買い" : "売り";
+            string new_signal_str = (buySellSignal == 1) ? "買い" : "売り";
+            Print("逆シグナル発生による決済条件成立: 前のシグナル = ", prev_signal_str, 
+                  " → 新しいシグナル = ", new_signal_str);
+        }
+        CloseAllPositions("逆シグナル発生による決済");
+    }
+    
+    // 部分決済のチェック
+    if (UsePartialClose)
+    {
+        CheckPartialClose();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| DI値のクロスによる決済チェック                                   |
+//+------------------------------------------------------------------+
+void CheckDICrossExit()
+{
+    // ポジションがない場合はスキップ
+    if (PositionsTotal() == 0)
+        return;
+    
+    // 現在のDI値
+    double currentPlusDI = plus_di[0];
+    double currentMinusDI = minus_di[0];
+    
+    // 前のバーのDI値
+    double prevPlusDI = plus_di[1];
+    double prevMinusDI = minus_di[1];
+    
+    // DI値のクロス検出
+    bool diCrossed = false;
+    
+    // 上昇トレンドから下降トレンドへ（+DIが-DIを下回る）
+    bool crossBearish = (prevPlusDI > prevMinusDI) && (currentPlusDI < currentMinusDI);
+    
+    // 下降トレンドから上昇トレンドへ（-DIが+DIを下回る）
+    bool crossBullish = (prevPlusDI < prevMinusDI) && (currentPlusDI > currentMinusDI);
+    
+    if (crossBearish || crossBullish)
+    {
+        diCrossed = true;
+        
+        if (VerboseLogging)
+        {
+            string cross_type = crossBullish ? "ブリッシュクロス(+DI > -DI)" : "ベアリッシュクロス(+DI < -DI)";
+            Print("DI値クロス検出: ", cross_type, " | +DI: ", 
+                  NormalizeDouble(currentPlusDI, LogDecimalPlaces), 
+                  " | -DI: ", NormalizeDouble(currentMinusDI, LogDecimalPlaces));
+        }
+    }
+    
+    // DIクロスが検出された場合、関連するポジションを決済
+    if (diCrossed)
+    {
+        for (int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            ulong ticket = PositionGetTicket(i);
+            if (ticket == 0)
+                continue;
+            
+            if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+                continue;
+            
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
+            // 買いポジションを持っていて、ベアリッシュクロスが発生した場合
+            if (type == POSITION_TYPE_BUY && crossBearish)
+            {
+                ClosePosition(ticket, "DI値のベアリッシュクロスによる決済");
+            }
+            // 売りポジションを持っていて、ブリッシュクロスが発生した場合
+            else if (type == POSITION_TYPE_SELL && crossBullish)
+            {
+                ClosePosition(ticket, "DI値のブリッシュクロスによる決済");
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 時間ベースの決済チェック                                          |
+//+------------------------------------------------------------------+
+void CheckTimeBasedExit()
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0)
+            continue;
+        
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+            continue;
+        
+        datetime position_time = (datetime)PositionGetInteger(POSITION_TIME);
+        datetime current_time = TimeCurrent();
+        
+        // 経過時間を計算（秒単位）
+        long elapsed_seconds = current_time - position_time;
+        
+        // 最大保有時間を超えていれば決済
+        if (elapsed_seconds > MaxTradeHours * 3600)
+        {
+            ClosePosition(ticket, "時間経過による決済");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 部分決済チェック                                                  |
+//+------------------------------------------------------------------+
+void CheckPartialClose()
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0)
+            continue;
+        
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+            continue;
+        
+        // ポジション情報の取得
+        ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+        
+        // 現在価格の取得
+        double current_price = (type == POSITION_TYPE_BUY) ? 
+                                SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                                SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        
+        // 利益の計算（ポイント単位）
+        double profit_points = 0;
+        if (type == POSITION_TYPE_BUY)
+            profit_points = (current_price - open_price) / _Point;
+        else
+            profit_points = (open_price - current_price) / _Point;
+        
+        // 指定した利益に達したかチェック
+        if (profit_points >= PartialClosePips)
+        {
+            // 部分決済を実行していない場合のみ実行
+            string comment = PositionGetString(POSITION_COMMENT);
+            if (StringFind(comment, "部分決済済") < 0)
+            {
+                PartialClosePosition(ticket, volume, type);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ポジションの部分決済                                              |
+//+------------------------------------------------------------------+
+void PartialClosePosition(ulong ticket, double volume, ENUM_POSITION_TYPE type)
+{
+    // 決済する量を計算
+    double close_volume = volume * PartialClosePercent / 100.0;
+    
+    // 最小ロットサイズよりも小さい場合は調整
+    double min_volume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    if (close_volume < min_volume)
+        close_volume = min_volume;
+    
+    // 残りの量が最小ロットサイズよりも小さくなる場合は全決済
+    if (volume - close_volume < min_volume)
+        close_volume = volume;
+    
+    for (int attempts = 0; attempts < MaxRetries; attempts++)
+    {
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+        
+        request.action = TRADE_ACTION_DEAL;
+        request.position = ticket;
+        request.symbol = _Symbol;
+        request.volume = close_volume;
+        request.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+        request.price = (type == POSITION_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        request.deviation = Slippage;
+        request.comment = "部分決済済";
+        
+        if (OrderSend(request, result))
+        {
+            if (result.retcode == TRADE_RETCODE_DONE)
+            {
+                Print("部分決済成功 チケット #", ticket, " サイズ:", close_volume);
+                
+                // 残りのポジションのコメントを更新
+                if (close_volume < volume)
+                {
+                    ModifyPositionComment(ticket, "部分決済済");
+                }
+                return;
+            }
+        }
+        
+        // エラー処理
+        int error_code = GetLastError();
+        if (error_code != ERR_NO_ERROR)
+        {
+            Print("部分決済エラー: ", error_code, " 再試行中 ", attempts + 1, "/", MaxRetries);
+            
+            // 4756エラー(取引サーバービジー)または10030エラー(無効な価格)の場合は再試行
+            if (error_code == 4756 || error_code == 10030)
+            {
+                Sleep(RetryDelay);
+                continue;
+            }
+            // その他のエラーの場合は中止
+            else
+            {
+                Print("部分決済失敗 チケット #", ticket, " エラーコード:", error_code);
+                break;
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ポジションコメントの修正                                          |
+//+------------------------------------------------------------------+
+void ModifyPositionComment(ulong ticket, string new_comment)
+{
+    // MT5ではポジションコメントを直接修正できないため、
+    // 別の方法（例：グローバル変数に保存）で管理する必要があります
+    // ここでは簡単のため省略しています
+}
+
+//+------------------------------------------------------------------+
+//| 買いポジションを開く                                              |
+//+------------------------------------------------------------------+
+void OpenBuy()
+{
+    // 取引量の確認と調整
+    double adjusted_lot = NormalizeVolume(Lots);
+    if (adjusted_lot <= 0)
+    {
+        Print("エラー: 有効なロットサイズが設定できません。取引をスキップします。");
+        return;
+    }
+    
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    // 連続エントリーチェック
+    if (!IsBuyEntryAllowed(ask))
+    {
+        return;  // 同じ価格帯での連続エントリーを防止
+    }
+    
+    double sl = (StopLoss > 0) ? ask - StopLoss * _Point : 0;
+    double tp = (TakeProfit > 0) ? ask + TakeProfit * _Point : 0;
+    
+    // ストップロスとテイクプロフィットの正規化
+    sl = NormalizeDouble(sl, _Digits);
+    tp = NormalizeDouble(tp, _Digits);
+    
+    for (int attempts = 0; attempts < MaxRetries; attempts++)
+    {
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+        
+        request.action = TRADE_ACTION_DEAL;
+        request.symbol = _Symbol;
+        request.volume = adjusted_lot;
+        request.type = ORDER_TYPE_BUY;
+        request.price = ask;
+        request.sl = sl;
+        request.tp = tp;
+        request.deviation = Slippage;
+        request.comment = divergenceDetected ? "ADX-K Burst Buy (Divergence)" : "ADX-K Burst Buy";
+        
+        // 注文フィルタイプの設定（ブローカー互換性のため）
+        int filling_mode = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+        if (filling_mode & SYMBOL_FILLING_FOK)
+            request.type_filling = ORDER_FILLING_FOK;
+        else if (filling_mode & SYMBOL_FILLING_IOC)
+            request.type_filling = ORDER_FILLING_IOC;
+        else
+            request.type_filling = ORDER_FILLING_RETURN;
+        
+        if (OrderSend(request, result))
+        {
+            if (result.retcode == TRADE_RETCODE_DONE)
+            {
+                if (VerboseLogging)
+                {
+                    double entry_price = NormalizeDouble(ask, LogDecimalPlaces);
+                    double sl_price = NormalizeDouble(sl, LogDecimalPlaces);
+                    double tp_price = NormalizeDouble(tp, LogDecimalPlaces);
+                    
+                    Print("買いポジション詳細 - ロット: ", adjusted_lot, 
+                          " | 価格: ", entry_price,
+                          " | SL: ", sl_price, 
+                          " | TP: ", tp_price,
+                          " | コメント: ", request.comment);
+                }
+                
+                Print("買いポジションがオープンされました. チケット #", result.order);
+                
+                // 成功した取引の価格を記録
+                RecordBuyPrice(ask);
+                
+                // ポジションの時間を記録
+                int pos_count = CountPositions();
+                if (pos_count > 0 && pos_count <= MaxPositions)
+                {
+                    positions_time[pos_count - 1] = TimeCurrent();
+                }
+                return;
+            }
+            else
+            {
+                if (VerboseLogging)
+                {
+                    Print("買いポジション開始失敗 - レスポンスコード: ", GetRetcodeDescription(result.retcode));
+                }
+            }
+        }
+        
+        // エラー処理
+        int error_code = GetLastError();
+        if (error_code != ERR_NO_ERROR)
+        {
+            Print("買いポジションエラー: ", error_code, " 再試行中 ", attempts + 1, "/", MaxRetries);
+            
+            // 4756エラー(取引サーバービジー)または10030エラー(無効な価格)の場合は再試行
+            if (error_code == 4756 || error_code == 10030)
+            {
+                Sleep(RetryDelay);
+                continue;
+            }
+            // その他のエラーの場合は中止
+            else
+            {
+                Print("買いポジションのオープンに失敗しました. エラーコード:", error_code);
+                break;
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 売りポジションを開く                                              |
+//+------------------------------------------------------------------+
+void OpenSell()
+{
+    // 取引量の確認と調整
+    double adjusted_lot = NormalizeVolume(Lots);
+    if (adjusted_lot <= 0)
+    {
+        Print("エラー: 有効なロットサイズが設定できません。取引をスキップします。");
+        return;
+    }
+    
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // 連続エントリーチェック
+    if (!IsSellEntryAllowed(bid))
+    {
+        return;  // 同じ価格帯での連続エントリーを防止
+    }
+    
+    // ストップロ
+    double sl = (StopLoss > 0) ? bid + StopLoss * _Point : 0;
+    double tp = (TakeProfit > 0) ? bid - TakeProfit * _Point : 0;
+    
+    // ストップロスとテイクプロフィットの正規化
+    sl = NormalizeDouble(sl, _Digits);
+    tp = NormalizeDouble(tp, _Digits);
+    
+    for (int attempts = 0; attempts < MaxRetries; attempts++)
+    {
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+        
+        request.action = TRADE_ACTION_DEAL;
+        request.symbol = _Symbol;
+        request.volume = adjusted_lot;
+        request.type = ORDER_TYPE_SELL;
+        request.price = bid;
+        request.sl = sl;
+        request.tp = tp;
+        request.deviation = Slippage;
+        request.comment = divergenceDetected ? "ADX-K Burst Sell (Divergence)" : "ADX-K Burst Sell";
+        
+        // 注文フィルタイプの設定（ブローカー互換性のため）
+        int filling_mode = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+        if (filling_mode & SYMBOL_FILLING_FOK)
+            request.type_filling = ORDER_FILLING_FOK;
+        else if (filling_mode & SYMBOL_FILLING_IOC)
+            request.type_filling = ORDER_FILLING_IOC;
+        else
+            request.type_filling = ORDER_FILLING_RETURN;
+        
+        if (OrderSend(request, result))
+        {
+            if (result.retcode == TRADE_RETCODE_DONE)
+            {
+                if (VerboseLogging)
+                {
+                    double entry_price = NormalizeDouble(bid, LogDecimalPlaces);
+                    double sl_price = NormalizeDouble(sl, LogDecimalPlaces);
+                    double tp_price = NormalizeDouble(tp, LogDecimalPlaces);
+                    
+                    Print("売りポジション詳細 - ロット: ", adjusted_lot, 
+                          " | 価格: ", entry_price,
+                          " | SL: ", sl_price, 
+                          " | TP: ", tp_price,
+                          " | コメント: ", request.comment);
+                }
+                
+                Print("売りポジションがオープンされました. チケット #", result.order);
+                
+                // 成功した取引の価格を記録
+                RecordSellPrice(bid);
+                
+                // ポジションの時間を記録
+                int pos_count = CountPositions();
+                if (pos_count > 0 && pos_count <= MaxPositions)
+                {
+                    positions_time[pos_count - 1] = TimeCurrent();
+                }
+                return;
+            }
+            else
+            {
+                if (VerboseLogging)
+                {
+                    Print("売りポジション開始失敗 - レスポンスコード: ", GetRetcodeDescription(result.retcode));
+                }
+            }
+        }
+        
+        // エラー処理
+        int error_code = GetLastError();
+        if (error_code != ERR_NO_ERROR)
+        {
+            Print("売りポジションエラー: ", error_code, " 再試行中 ", attempts + 1, "/", MaxRetries);
+            
+            // 4756エラー(取引サーバービジー)または10030エラー(無効な価格)の場合は再試行
+            if (error_code == 4756 || error_code == 10030)
+            {
+                Sleep(RetryDelay);
+                continue;
+            }
+            // その他のエラーの場合は中止
+            else
+            {
+                Print("売りポジションのオープンに失敗しました. エラーコード:", error_code);
+                break;
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ポジションの管理                                                  |
+//+------------------------------------------------------------------+
+void ManagePositions()
+{
+    if (!UseTrailingStop)
+        return;
+    
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0)
+            continue;
+        
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+            continue;
+        
+        ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double current_sl = PositionGetDouble(POSITION_SL);
+        double current_tp = PositionGetDouble(POSITION_TP);
+        
+        if (type == POSITION_TYPE_BUY)
+        {
+            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double new_sl = NormalizeDouble(bid - TrailingStop * _Point, _Digits);
+            
+            if (new_sl > current_sl || current_sl == 0)
+            {
+                if (bid - current_sl > TrailingStep * _Point || current_sl == 0)
+                {
+                    ModifyPosition(ticket, new_sl, current_tp);
+                }
+            }
+        }
+        else if (type == POSITION_TYPE_SELL)
+        {
+            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double new_sl = NormalizeDouble(ask + TrailingStop * _Point, _Digits);
+            
+            if (new_sl < current_sl || current_sl == 0)
+            {
+                if (current_sl - ask > TrailingStep * _Point || current_sl == 0)
+                {
+                    ModifyPosition(ticket, new_sl, current_tp);
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ポジションの修正                                                  |
+//+------------------------------------------------------------------+
+bool ModifyPosition(ulong ticket, double sl, double tp)
+{
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_SLTP;
+    request.position = ticket;
+    request.symbol = _Symbol;
+    request.sl = sl;
+    request.tp = tp;
+    
+    bool success = OrderSend(request, result);
+    
+    if (success)
+        Print("ポジション #", ticket, " 修正成功");
+    else
+        Print("ポジション #", ticket, " 修正失敗. エラーコード:", GetLastError());
+    
+    return success;
+}
+
+//+------------------------------------------------------------------+
+//| ポジションを閉じる                                               |
+//+------------------------------------------------------------------+
+bool ClosePosition(ulong ticket, string reason)
+{
+    if (!PositionSelectByTicket(ticket))
+        return false;
+        
+    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    
+    for (int attempts = 0; attempts < MaxRetries; attempts++)
+    {
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+        
+        request.action = TRADE_ACTION_DEAL;
+        request.position = ticket;
+        request.symbol = _Symbol;
+        request.volume = volume;
+        request.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+        request.price = (type == POSITION_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        request.deviation = Slippage;
+        request.comment = reason;
+        
+        if (OrderSend(request, result))
+        {
+            if (result.retcode == TRADE_RETCODE_DONE)
+            {
+                double close_price = (type == POSITION_TYPE_BUY) ? 
+                                    SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                                    SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                
+                if (VerboseLogging)
+                {
+                    // ポジション情報を取得
+                    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+                    double profit = PositionGetDouble(POSITION_PROFIT);
+                    
+                    // 価格の計算と整形
+                    double price_diff = NormalizeDouble(MathAbs(close_price - open_price), LogDecimalPlaces);
+                    double points = NormalizeDouble(price_diff / _Point, 0);
+                    profit = NormalizeDouble(profit, 2); // 利益は2桁まで
+                    
+                    string pos_type = (type == POSITION_TYPE_BUY) ? "買い" : "売り";
+                    Print("ポジション #", ticket, " 決済詳細 - タイプ: ", pos_type,
+                          " | 決済価格: ", NormalizeDouble(close_price, LogDecimalPlaces),
+                          " | 損益: ", profit, "USD",
+                          " | 値動き: ", points, "ポイント",
+                          " | 理由: ", reason);
+                }
+                
+                Print("ポジション #", ticket, " 決済成功: ", reason);
+                return true;
+            }
+            else
+            {
+                if (VerboseLogging)
+                {
+                    Print("ポジション決済失敗 #", ticket, " - レスポンスコード: ", GetRetcodeDescription(result.retcode));
+                }
+            }
+        }
+        
+        // エラー処理
+        int error_code = GetLastError();
+        if (error_code != ERR_NO_ERROR)
+        {
+            Print("ポジション決済エラー: ", error_code, " 再試行中 ", attempts + 1, "/", MaxRetries);
+            
+            // 4756エラー(取引サーバービジー)または10030エラー(無効な価格)の場合は再試行
+            if (error_code == 4756 || error_code == 10030)
+            {
+                Sleep(RetryDelay);
+                continue;
+            }
+            // その他のエラーの場合は中止
+            else
+            {
+                Print("ポジション #", ticket, " 決済失敗. エラーコード:", error_code);
+                break;
+            }
+        }
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| 全ポジションを閉じる                                              |
+//+------------------------------------------------------------------+
+void CloseAllPositions(string reason)
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0)
+            continue;
+        
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+            continue;
+        
+        ClosePosition(ticket, reason);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| オープンポジションのカウント                                      |
+//+------------------------------------------------------------------+
+int CountPositions()
+{
+    int count = 0;
+    
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0)
+            continue;
+        
+        if (PositionGetString(POSITION_SYMBOL) == _Symbol)
+            count++;
+    }
+    
+    return count;
+}
+
+//+------------------------------------------------------------------+
+//| ロットサイズを正規化する                                          |
+//+------------------------------------------------------------------+
+double NormalizeVolume(double volume)
+{
+    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    // 最小値、最大値の範囲内に調整
+    volume = MathMax(min_lot, MathMin(volume, max_lot));
+    
+    // ロットステップに合わせて丸める
+    int steps = (int)MathRound(volume / lot_step);
+    volume = steps * lot_step;
+    
+    // 小数点以下の桁数を調整
+    int digits = 0;
+    if (lot_step < 0.1)
+        digits = 2;
+    else if (lot_step < 1)
+        digits = 1;
+    
+    return NormalizeDouble(volume, digits);
+}
+
+//+------------------------------------------------------------------+
+//| トレードアクションの結果をチェック                                |
+//+------------------------------------------------------------------+
+string GetRetcodeDescription(int retcode)
+{
+    switch(retcode)
+    {
+        case TRADE_RETCODE_REQUOTE:
+            return "リクオート";
+        case TRADE_RETCODE_REJECT:
+            return "リクエスト拒否";
+        case TRADE_RETCODE_CANCEL:
+            return "トレーダーによるキャンセル";
+        case TRADE_RETCODE_PLACED:
+            return "注文受付";
+        case TRADE_RETCODE_DONE:
+            return "完了";
+        case TRADE_RETCODE_DONE_PARTIAL:
+            return "部分的に完了";
+        case TRADE_RETCODE_ERROR:
+            return "処理エラー";
+        case TRADE_RETCODE_TIMEOUT:
+            return "タイムアウト";
+        case TRADE_RETCODE_INVALID:
+            return "無効なリクエスト";
+        case TRADE_RETCODE_INVALID_VOLUME:
+            return "無効なボリューム";
+        case TRADE_RETCODE_INVALID_PRICE:
+            return "無効な価格";
+        case TRADE_RETCODE_INVALID_STOPS:
+            return "無効なストップ";
+        case TRADE_RETCODE_TRADE_DISABLED:
+            return "取引無効";
+        case TRADE_RETCODE_MARKET_CLOSED:
+            return "市場閉鎖";
+        case TRADE_RETCODE_NO_MONEY:
+            return "資金不足";
+        case TRADE_RETCODE_PRICE_CHANGED:
+            return "価格変更";
+        case TRADE_RETCODE_PRICE_OFF:
+            return "価格不在";
+        case TRADE_RETCODE_INVALID_EXPIRATION:
+            return "無効な有効期限";
+        case TRADE_RETCODE_ORDER_CHANGED:
+            return "注文変更";
+        case TRADE_RETCODE_TOO_MANY_REQUESTS:
+            return "リクエスト過多";
+        case TRADE_RETCODE_NO_CHANGES:
+            return "変更なし";
+        case TRADE_RETCODE_SERVER_DISABLES_AT:
+            return "サーバーがAutoTrading無効";
+        case TRADE_RETCODE_CLIENT_DISABLES_AT:
+            return "クライアントがAutoTrading無効";
+        case TRADE_RETCODE_LOCKED:
+            return "ロック";
+        case TRADE_RETCODE_FROZEN:
+            return "凍結";
+        case TRADE_RETCODE_INVALID_FILL:
+            return "無効なフィル";
+        case TRADE_RETCODE_CONNECTION:
+            return "接続なし";
+        case TRADE_RETCODE_ONLY_REAL:
+            return "リアル口座のみ";
+        case TRADE_RETCODE_LIMIT_ORDERS:
+            return "指値注文数上限";
+        case TRADE_RETCODE_LIMIT_VOLUME:
+            return "ボリューム上限";
+        case TRADE_RETCODE_INVALID_ORDER:
+            return "無効な注文";
+        case TRADE_RETCODE_POSITION_CLOSED:
+            return "ポジション閉鎖済み";
+        default:
+            return "不明なコード";
+    }
+}
